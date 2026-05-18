@@ -73,7 +73,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
         status = await Permission.mediaLibrary.request().isGranted;
       }
     } catch (e) {
-      print("權限請求出錯: $e");
+      debugPrint("權限請求出錯: $e");
     }
 
     if (!mounted) return;
