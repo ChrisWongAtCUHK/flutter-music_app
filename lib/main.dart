@@ -1,122 +1,121 @@
 import 'package:flutter/material.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:on_audio_query/on_audio_query.dart';
 
-void main() {
-  runApp(const MyApp());
+void main() => runApp(const MaterialApp(home: LocalMusicPlayer()));
+
+class LocalMusicPlayer extends StatefulWidget {
+  const LocalMusicPlayer({super.key});
+
+  @override
+  State<LocalMusicPlayer> createState() => _LocalMusicPlayerState();
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class _LocalMusicPlayerState extends State<LocalMusicPlayer> {
+  final OnAudioQuery _audioQuery = OnAudioQuery();
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  bool _hasPermission = false;
 
-  // This widget is the root of your application.
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
-    );
+  void initState() {
+    super.initState();
+    _checkAndRequestPermission();
   }
-}
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
+  // 1. 檢查並動態申請手機儲存權限
+  Future<void> _checkAndRequestPermission() async {
+    // 檢查目前是否已擁有權限
+    bool permissionStatus = await _audioQuery.permissionsStatus();
 
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
+    if (!permissionStatus) {
+      // 如果沒有，向系統發起請求
+      permissionStatus = await _audioQuery.permissionsStatus(); // 內部封裝的權限請求
+    }
 
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
-
-  @override
-  State<MyHomePage> createState() => _MyHomePageState();
-}
-
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
-
-  void _incrementCounter() {
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _hasPermission = permissionStatus;
     });
   }
 
+  // 2. 播放選中的本地歌曲
+  void _playSong(String? uri) async {
+    if (uri == null) return;
+    try {
+      // just_audio 可以直接解析 on_audio_query 提供的本地 Uri 檔案路徑
+      await _audioPlayer.setAudioSource(AudioSource.uri(Uri.parse(uri)));
+      if (!mounted) return;
+
+      _audioPlayer.play();
+    } catch (e) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text("播放失敗: $e")));
+    }
+  }
+
+  @override
+  void dispose() {
+    _audioPlayer.dispose(); // 記得關閉播放器釋放記憶體
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
-          children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+      appBar: AppBar(title: const Text("本地 MP3 播放器")),
+      body: !_hasPermission
+          ? Center(
+              child: ElevatedButton(
+                onPressed: _checkAndRequestPermission,
+                child: const Text("授權讀取手機音樂"),
+              ),
+            )
+          : FutureBuilder<List<SongModel>>(
+              // 3. 自動掃描裝置內的所有音訊檔案
+              future: _audioQuery.querySongs(
+                sortType: null,
+                orderType: OrderType.ASC_OR_SMALLER,
+                uriType: UriType.EXTERNAL,
+                ignoreCase: true,
+              ),
+              builder: (context, item) {
+                // 載入中的讀取圈圈
+                if (item.data == null) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                // 手機內沒撈到任何 MP3 檔案
+                if (item.data!.isEmpty) {
+                  return const Center(child: Text("未找到本地音樂檔案"));
+                }
+
+                // 4. 渲染音樂列表 UI
+                return ListView.builder(
+                  itemCount: item.data!.length,
+                  itemBuilder: (context, index) {
+                    SongModel song = item.data![index];
+                    return ListTile(
+                      title: Text(
+                        song.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text(song.artist ?? "未知歌手"),
+                      // 顯示內嵌在 MP3 檔案裡的專輯封面，若無則顯示預設音樂圖示
+                      leading: QueryArtworkWidget(
+                        id: song.id,
+                        type: ArtworkType.AUDIO,
+                        nullArtworkWidget: const Icon(
+                          Icons.music_note,
+                          size: 40,
+                        ),
+                      ),
+                      trailing: const Icon(Icons.play_arrow),
+                      onTap: () => _playSong(song.uri),
+                    );
+                  },
+                );
+              },
             ),
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ),
     );
   }
 }

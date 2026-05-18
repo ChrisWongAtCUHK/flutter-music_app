@@ -2,7 +2,7 @@ name: music_app
 description: "A new Flutter project."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
-publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+publish_to: "none" # Remove this line if you wish to publish to pub.dev
 
 # The following defines the version and build number for your application.
 # A version number is three numbers separated by dots, like 1.2.43
@@ -30,6 +30,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  just_audio: ^0.9.44 # 高效音訊播放器
+  on_audio_query: ^2.9.0 # 掃描手機本地 MP3 檔案與歌曲資訊
+  permission_handler: ^11.3.1 # 處理 Android/iOS 的權限要求
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -51,7 +54,6 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
-
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
   # the material Icons class.
