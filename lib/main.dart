@@ -1,8 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:on_audio_query/on_audio_query.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 
-void main() => runApp(const MaterialApp(home: LocalMusicPlayer()));
+void main() => runApp(
+  const MaterialApp(
+    home: LocalMusicPlayer(),
+    // 移除右上角的 Debug 標籤
+    debugShowCheckedModeBanner: false,
+  ),
+);
 
 class LocalMusicPlayer extends StatefulWidget {
   const LocalMusicPlayer({super.key});
@@ -11,42 +19,77 @@ class LocalMusicPlayer extends StatefulWidget {
   State<LocalMusicPlayer> createState() => _LocalMusicPlayerState();
 }
 
-class _LocalMusicPlayerState extends State<LocalMusicPlayer> {
+// 加上 WidgetsBindingObserver 用來監聽權限視窗關閉、回到 App 的事件
+class _LocalMusicPlayerState extends State<LocalMusicPlayer>
+    with WidgetsBindingObserver {
   final OnAudioQuery _audioQuery = OnAudioQuery();
   final AudioPlayer _audioPlayer = AudioPlayer();
   bool _hasPermission = false;
+  bool _isLoading = true; // 新增：讀取狀態鎖
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this); // 註冊監聽器
     _checkAndRequestPermission();
   }
 
-  // 1. 檢查並動態申請手機儲存權限
-  Future<void> _checkAndRequestPermission() async {
-    // 檢查目前是否已擁有權限
-    bool permissionStatus = await _audioQuery.permissionsStatus();
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this); // 註銷監聽器
+    _audioPlayer.dispose();
+    super.dispose();
+  }
 
-    if (!permissionStatus) {
-      // 如果沒有，向系統發起請求
-      permissionStatus = await _audioQuery.permissionsStatus(); // 內部封裝的權限請求
+  // 當 App 生命週期改變時觸發（例如從權限視窗回到 App）
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // 當使用者點完「允許」回到 App 時，重新檢查並強制重整畫面
+      _checkAndRequestPermission();
     }
+  }
+
+  Future<void> _checkAndRequestPermission() async {
+    bool status = false;
+    if (!mounted) return;
 
     setState(() {
-      _hasPermission = permissionStatus;
+      _isLoading = true;
+    });
+
+    try {
+      if (Theme.of(context).platform == TargetPlatform.android) {
+        final deviceInfo = DeviceInfoPlugin();
+        final androidInfo = await deviceInfo.androidInfo;
+        if (!mounted) return;
+
+        if (androidInfo.version.sdkInt >= 33) {
+          status = await Permission.audio.request().isGranted;
+        } else {
+          status = await Permission.storage.request().isGranted;
+        }
+      } else if (Theme.of(context).platform == TargetPlatform.iOS) {
+        status = await Permission.mediaLibrary.request().isGranted;
+      }
+    } catch (e) {
+      print("權限請求出錯: $e");
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _hasPermission = status;
+      _isLoading = false; // 關閉讀取圈圈
     });
   }
 
-  // 2. 播放選中的本地歌曲
   void _playSong(String? uri) async {
     if (uri == null) return;
     try {
-      // just_audio 可以直接解析 on_audio_query 提供的本地 Uri 檔案路徑
       await _audioPlayer.setAudioSource(AudioSource.uri(Uri.parse(uri)));
-      if (!mounted) return;
-
       _audioPlayer.play();
     } catch (e) {
+      if (!mounted) return;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text("播放失敗: $e")));
@@ -54,24 +97,36 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer> {
   }
 
   @override
-  void dispose() {
-    _audioPlayer.dispose(); // 記得關閉播放器釋放記憶體
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("本地 MP3 播放器")),
-      body: !_hasPermission
+      appBar: AppBar(
+        title: const Text("本地 MP3 播放器"),
+        actions: [
+          // 右上角放一個手動整理按鈕，方便測試
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _checkAndRequestPermission,
+          ),
+        ],
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator()) // 讀取中
+          : !_hasPermission
           ? Center(
-              child: ElevatedButton(
-                onPressed: _checkAndRequestPermission,
-                child: const Text("授權讀取手機音樂"),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text("需要儲存空間權限才能讀取音樂"),
+                  const SizedBox(height: 20),
+                  ElevatedButton(
+                    onPressed: _checkAndRequestPermission,
+                    child: const Text("授予權限"),
+                  ),
+                ],
               ),
             )
           : FutureBuilder<List<SongModel>>(
-              // 3. 自動掃描裝置內的所有音訊檔案
+              // 每次 _hasPermission 改變或手動點 refresh，這裡就會重新掃描
               future: _audioQuery.querySongs(
                 sortType: null,
                 orderType: OrderType.ASC_OR_SMALLER,
@@ -79,16 +134,15 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer> {
                 ignoreCase: true,
               ),
               builder: (context, item) {
-                // 載入中的讀取圈圈
-                if (item.data == null) {
+                if (item.connectionState == ConnectionState.waiting) {
                   return const Center(child: CircularProgressIndicator());
                 }
-                // 手機內沒撈到任何 MP3 檔案
-                if (item.data!.isEmpty) {
-                  return const Center(child: Text("未找到本地音樂檔案"));
+                if (item.data == null || item.data!.isEmpty) {
+                  return const Center(
+                    child: Text("未找到本地音樂檔案\n請確認手機記憶體內有 .mp3 檔案"),
+                  );
                 }
 
-                // 4. 渲染音樂列表 UI
                 return ListView.builder(
                   itemCount: item.data!.length,
                   itemBuilder: (context, index) {
@@ -100,7 +154,6 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer> {
                         overflow: TextOverflow.ellipsis,
                       ),
                       subtitle: Text(song.artist ?? "未知歌手"),
-                      // 顯示內嵌在 MP3 檔案裡的專輯封面，若無則顯示預設音樂圖示
                       leading: QueryArtworkWidget(
                         id: song.id,
                         type: ArtworkType.AUDIO,
