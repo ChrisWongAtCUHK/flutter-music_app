@@ -24,7 +24,13 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
     with WidgetsBindingObserver {
   final OnAudioQuery _audioQuery = OnAudioQuery();
   final AudioPlayer _audioPlayer = AudioPlayer();
-  late ConcatenatingAudioSource _playlist;
+  // 初始化一個空的可追加播放佇列
+  final ConcatenatingAudioSource _playlist = ConcatenatingAudioSource(
+    children: [],
+  );
+
+  // 記錄目前加進播放佇列裡的歌曲物件（給播放佇列畫面 UI 使用）
+  final List<SongModel> _myCurrentQueue = [];
   bool _hasPermission = false;
   bool _isLoading = true; // 新增：讀取狀態鎖
 
@@ -35,6 +41,18 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
     super.initState();
     WidgetsBinding.instance.addObserver(this); // 註冊監聽器
     _checkAndRequestPermission();
+
+    // 讓播放器載入這個空的佇列
+    _audioPlayer.setAudioSource(_playlist);
+
+    // 監聽播放器目前播到第幾首，自動更新 Mini Player 的 UI
+    _audioPlayer.currentIndexStream.listen((index) {
+      if (index != null && index < _myCurrentQueue.length && mounted) {
+        setState(() {
+          _currentSong = _myCurrentQueue[index];
+        });
+      }
+    });
   }
 
   @override
@@ -86,46 +104,40 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
     });
   }
 
-  void _playSong(List<SongModel> allSongs, int initialIndex) async {
+  void _playSong(SongModel song) async {
     try {
-      // 1. Build the playlist from the entire list of queried songs
-      _playlist = ConcatenatingAudioSource(
-        children: allSongs.map((song) {
-          return AudioSource.uri(
-            Uri.parse(song.uri!),
-            tag:
-                song, // Optional: store the song object inside the tag for easy tracking
-          );
-        }).toList(),
-      );
+      // 1. 檢查這首歌是否已經在佇列中（若不想重複加入可以加這行判斷，若允許重複可刪除）
+      // if (_myCurrentQueue.any((element) => element.id == song.id)) return;
 
+      // 2. 包裝成 AudioSource 並追加到 just_audio 的佇列結尾
+      final source = AudioSource.uri(Uri.parse(song.uri!), tag: song);
+      await _playlist.add(source);
+
+      // 3. 同步加到我們自己的 UI 歌單陣列裡
       setState(() {
-        _currentSong = allSongs[initialIndex]; // Record current song
+        _myCurrentQueue.add(song);
       });
 
-      // 2. Set the playlist as the audio source
-      await _audioPlayer.setAudioSource(
-        _playlist,
-        initialIndex: initialIndex, // Start playing from the clicked song index
-        initialPosition: Duration.zero,
-      );
-
-      _audioPlayer.play();
-
-      // 3. Listen to the sequence state stream to automatically update the Mini Player UI
-      // when the next song starts playing sequentially
-      _audioPlayer.currentIndexStream.listen((index) {
-        if (index != null && mounted) {
-          setState(() {
-            _currentSong = allSongs[index];
-          });
-        }
-      });
+      // 4. 如果這是加入的第一首歌（目前播放器是停止或剛啟動狀態），就直接播放
+      if (_audioPlayer.processingState == ProcessingState.idle ||
+          _playlist.length == 1) {
+        setState(() {
+          _currentSong = song;
+        });
+        await _audioPlayer.seek(Duration.zero, index: _playlist.length - 1);
+        _audioPlayer.play();
+      } else {
+        if (!mounted) return;
+        // 如果本來就在放歌，跳出提示告訴用戶已成功加入佇列
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text("已加入播放佇列: ${song.title}")));
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text("播放失敗: $e")));
+      ).showSnackBar(SnackBar(content: Text("加入失敗: $e")));
     }
   }
 
@@ -193,7 +205,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                             ),
                           ),
                           trailing: const Icon(Icons.play_arrow),
-                          onTap: () => _playSong(item.data!, index),
+                          onTap: () => _playSong(item.data![index]),
                         );
                       },
                     );
@@ -294,6 +306,46 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                       icon: const Icon(Icons.skip_next),
                       onPressed: () => _audioPlayer.seekToNext(),
                     ),
+                    IconButton(
+                      icon: const Icon(Icons.queue_music),
+                      onPressed: () {
+                        showModalBottomSheet(
+                          context: context,
+                          shape: const RoundedRectangleBorder(
+                            borderRadius: BorderRadius.vertical(
+                              top: Radius.circular(20),
+                            ),
+                          ),
+                          builder: (context) {
+                            return Container(
+                              padding: const EdgeInsets.all(16),
+                              height:
+                                  MediaQuery.of(context).size.height *
+                                  0.6, // 60% screen height
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    "播放隊列",
+                                    style: TextStyle(
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  const Divider(),
+                                  Expanded(
+                                    // Pass list of songs here
+                                    child: _buildPlaylistViewer(
+                                      _myCurrentQueue,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        );
+                      },
+                    ),
                   ],
                 );
               },
@@ -301,6 +353,55 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildPlaylistViewer(List<SongModel> playlistSongs) {
+    return StreamBuilder<int?>(
+      stream: _audioPlayer.currentIndexStream,
+      builder: (context, snapshot) {
+        final currentIndex = snapshot.data;
+
+        return ListView.builder(
+          shrinkWrap:
+              true, // Useful if you place this inside a ModalBottomSheet or Column
+          physics: const ClampingScrollPhysics(),
+          itemCount: playlistSongs.length,
+          itemBuilder: (context, index) {
+            final song = playlistSongs[index];
+            final isPlaying = currentIndex == index;
+
+            return ListTile(
+              leading: QueryArtworkWidget(
+                id: song.id,
+                type: ArtworkType.AUDIO,
+                errorBuilder: (context, exception, giddig) {
+                  return const Icon(Icons.music_note, color: Colors.blue);
+                },
+              ),
+              title: Text(
+                song.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontWeight: isPlaying ? FontWeight.bold : FontWeight.normal,
+                  color: isPlaying ? Colors.blue : Colors.black,
+                ),
+              ),
+              subtitle: Text(song.artist ?? "未知藝術家"),
+              trailing: isPlaying
+                  ? const Icon(Icons.volume_up, color: Colors.blue)
+                  : const Icon(
+                      Icons.dehaze,
+                    ), // Visual cue for list reordering/queue
+              onTap: () async {
+                // Jump directly to the clicked song in the active playlist
+                await _audioPlayer.seek(Duration.zero, index: index);
+              },
+            );
+          },
+        );
+      },
     );
   }
 }
