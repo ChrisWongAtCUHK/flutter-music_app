@@ -24,6 +24,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
     with WidgetsBindingObserver {
   final OnAudioQuery _audioQuery = OnAudioQuery();
   final AudioPlayer _audioPlayer = AudioPlayer();
+  late ConcatenatingAudioSource _playlist;
   bool _hasPermission = false;
   bool _isLoading = true; // 新增：讀取狀態鎖
 
@@ -85,14 +86,41 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
     });
   }
 
-  void _playSong(SongModel song) async {
-    if (song.uri == null) return;
+  void _playSong(List<SongModel> allSongs, int initialIndex) async {
     try {
+      // 1. Build the playlist from the entire list of queried songs
+      _playlist = ConcatenatingAudioSource(
+        children: allSongs.map((song) {
+          return AudioSource.uri(
+            Uri.parse(song.uri!),
+            tag:
+                song, // Optional: store the song object inside the tag for easy tracking
+          );
+        }).toList(),
+      );
+
       setState(() {
-        _currentSong = song; // 記錄當前歌曲
+        _currentSong = allSongs[initialIndex]; // Record current song
       });
-      await _audioPlayer.setAudioSource(AudioSource.uri(Uri.parse(song.uri!)));
+
+      // 2. Set the playlist as the audio source
+      await _audioPlayer.setAudioSource(
+        _playlist,
+        initialIndex: initialIndex, // Start playing from the clicked song index
+        initialPosition: Duration.zero,
+      );
+
       _audioPlayer.play();
+
+      // 3. Listen to the sequence state stream to automatically update the Mini Player UI
+      // when the next song starts playing sequentially
+      _audioPlayer.currentIndexStream.listen((index) {
+        if (index != null && mounted) {
+          setState(() {
+            _currentSong = allSongs[index];
+          });
+        }
+      });
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -165,7 +193,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                             ),
                           ),
                           trailing: const Icon(Icons.play_arrow),
-                          onTap: () => _playSong(song), // 傳入整首歌曲物件
+                          onTap: () => _playSong(item.data!, index),
                         );
                       },
                     );
@@ -235,6 +263,10 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
 
                 return Row(
                   children: [
+                    IconButton(
+                      icon: const Icon(Icons.skip_previous),
+                      onPressed: () => _audioPlayer.seekToPrevious(),
+                    ),
                     // 1. 播放 / 暫停 控制鈕
                     IconButton(
                       icon: Icon(playing ? Icons.pause : Icons.play_arrow),
@@ -257,6 +289,10 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                           _currentSong = null; // 關閉底部的 Mini Player 介面
                         });
                       },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.skip_next),
+                      onPressed: () => _audioPlayer.seekToNext(),
                     ),
                   ],
                 );
