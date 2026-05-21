@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:on_audio_query/on_audio_query.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:device_info_plus/device_info_plus.dart';
 
 void main() => runApp(
   const MaterialApp(
@@ -80,21 +78,17 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
     });
 
     try {
-      if (Theme.of(context).platform == TargetPlatform.android) {
-        final deviceInfo = DeviceInfoPlugin();
-        final androidInfo = await deviceInfo.androidInfo;
-        if (!mounted) return;
+      // 1. 先檢查目前是否已經擁有權限
+      status = await _audioQuery.permissionsStatus();
 
-        if (androidInfo.version.sdkInt >= 33) {
-          status = await Permission.audio.request().isGranted;
-        } else {
-          status = await Permission.storage.request().isGranted;
-        }
-      } else if (Theme.of(context).platform == TargetPlatform.iOS) {
-        status = await Permission.mediaLibrary.request().isGranted;
+      // 2. 如果沒有權限，則發起請求
+      if (!status) {
+        status = await _audioQuery.permissionsRequest();
       }
     } catch (e) {
       debugPrint("權限請求出錯: $e");
+      // 如果在桌面模擬器或特定環境報錯，可以選擇開啟此行當作保底：
+      // status = true;
     }
 
     if (!mounted) return;

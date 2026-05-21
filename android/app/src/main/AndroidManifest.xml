@@ -46,4 +46,8 @@
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <!-- Android 12 以下讀取檔案權限 -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <!-- 如果你需要讀取外部 SD 卡，可能還需要這行 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+
 </manifest>
