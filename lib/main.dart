@@ -316,31 +316,25 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                               top: Radius.circular(20),
                             ),
                           ),
+
                           builder: (context) {
-                            return Container(
-                              padding: const EdgeInsets.all(16),
-                              height:
-                                  MediaQuery.of(context).size.height *
-                                  0.6, // 60% screen height
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text(
-                                    "播放隊列",
-                                    style: TextStyle(
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  const Divider(),
-                                  Expanded(
-                                    // Pass list of songs here
-                                    child: _buildPlaylistViewer(
-                                      _myCurrentQueue,
-                                    ),
-                                  ),
-                                ],
-                              ),
+                            return StatefulBuilder(
+                              builder:
+                                  (
+                                    BuildContext context,
+                                    StateSetter sheetState,
+                                  ) {
+                                    return Container(
+                                      padding: const EdgeInsets.all(16),
+                                      height:
+                                          MediaQuery.of(context).size.height *
+                                          0.6, // 60% screen height
+                                      child: _buildPlaylistViewer(
+                                        _myCurrentQueue,
+                                        sheetState,
+                                      ),
+                                    );
+                                  },
                             );
                           },
                         );
@@ -356,83 +350,147 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
     );
   }
 
-  Widget _buildPlaylistViewer(List<SongModel> playlistSongs) {
+  Widget _buildPlaylistViewer(
+    List<SongModel> playlistSongs,
+    StateSetter sheetState,
+  ) {
     return StreamBuilder<int?>(
       stream: _audioPlayer.currentIndexStream,
       builder: (context, snapshot) {
         final currentIndex = snapshot.data;
 
-        return ListView.builder(
-          shrinkWrap:
-              true, // Useful if you place this inside a ModalBottomSheet or Column
-          physics: const ClampingScrollPhysics(),
-          itemCount: playlistSongs.length,
-          itemBuilder: (context, index) {
-            final song = playlistSongs[index];
-            final isPlaying = currentIndex == index;
-
-            // 使用 Dismissible 實作側滑刪除
-            return Dismissible(
-              key: Key(song.id.toString() + index.toString()), // 確保 Key 唯一
-              direction: DismissDirection.endToStart, // 只能從右往左滑
-              background: Container(
-                color: Colors.red,
-                alignment: Alignment.centerRight,
-                padding: const EdgeInsets.only(right: 20),
-                child: const Icon(Icons.delete, color: Colors.white),
-              ),
-              onDismissed: (direction) async {
-                final messenger = ScaffoldMessenger.of(context);
-
-                // 1. 從 just_audio 播放器佇列中移除
-                await _playlist.removeAt(index);
-
-                // 2. 從我們的 UI 陣列中移除
-                setState(() {
-                  playlistSongs.removeAt(index);
-                  // 如果刪除的是當前播放的歌，且佇列空了，清除當前歌曲狀態
-                  if (playlistSongs.isEmpty) {
-                    _currentSong = null;
-                  }
-                });
-
-                messenger.showSnackBar(
-                  SnackBar(
-                    content: Text("已移出佇列: ${song.title}"),
-                    duration: const Duration(seconds: 1),
-                  ),
-                );
-              },
-              child: ListTile(
-                leading: QueryArtworkWidget(
-                  id: song.id,
-                  type: ArtworkType.AUDIO,
-                  errorBuilder: (context, exception, giddig) {
-                    return const Icon(Icons.music_note, color: Colors.blue);
-                  },
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  "播放隊列",
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                 ),
-                title: Text(
-                  song.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontWeight: isPlaying ? FontWeight.bold : FontWeight.normal,
-                    color: isPlaying ? Colors.blue : Colors.black,
+                if (playlistSongs.isNotEmpty)
+                  TextButton.icon(
+                    onPressed: () async {
+                      await _playlist.clear(); // 清空播放器佇列
+                      _audioPlayer.stop(); // 停止播放
+
+                      // 同步刷新主畫面（Mini Player 會消失）
+                      setState(() {
+                        _myCurrentQueue.clear();
+                        _currentSong = null;
+                      });
+
+                      // 同步刷新彈出視窗內部（列表立刻變空，不需點擊兩次）
+                      sheetState(() {});
+                    },
+                    icon: const Icon(Icons.delete_sweep, color: Colors.red),
+                    label: const Text(
+                      "清空全部",
+                      style: TextStyle(color: Colors.red),
+                    ),
                   ),
-                ),
-                subtitle: Text(song.artist ?? "未知藝術家"),
-                trailing: isPlaying
-                    ? const Icon(Icons.volume_up, color: Colors.blue)
-                    : const Icon(
-                        Icons.dehaze,
-                      ), // Visual cue for list reordering/queue
-                onTap: () async {
-                  // Jump directly to the clicked song in the active playlist
-                  await _audioPlayer.seek(Duration.zero, index: index);
-                },
-              ),
-            );
-          },
+              ],
+            ),
+            const Divider(),
+            Expanded(
+              child: playlistSongs.isEmpty
+                  ? const Center(
+                      child: Text(
+                        "播放佇列是空的",
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                    )
+                  : ListView.builder(
+                      shrinkWrap:
+                          true, // Useful if you place this inside a ModalBottomSheet or Column
+                      physics: const ClampingScrollPhysics(),
+                      itemCount: playlistSongs.length,
+                      itemBuilder: (context, index) {
+                        final song = playlistSongs[index];
+                        final isPlaying = currentIndex == index;
+
+                        // 使用 Dismissible 實作側滑刪除
+                        return Dismissible(
+                          key: Key(
+                            song.id.toString() + index.toString(),
+                          ), // 確保 Key 唯一
+                          direction: DismissDirection.endToStart, // 只能從右往左滑
+                          background: Container(
+                            color: Colors.red,
+                            alignment: Alignment.centerRight,
+                            padding: const EdgeInsets.only(right: 20),
+                            child: const Icon(
+                              Icons.delete,
+                              color: Colors.white,
+                            ),
+                          ),
+                          onDismissed: (direction) async {
+                            final messenger = ScaffoldMessenger.of(context);
+
+                            // 1. 從 just_audio 播放器佇列中移除
+                            await _playlist.removeAt(index);
+
+                            // 2. 從我們的 UI 陣列中移除
+                            setState(() {
+                              playlistSongs.removeAt(index);
+                              // 如果刪除的是當前播放的歌，且佇列空了，清除當前歌曲狀態
+                              if (playlistSongs.isEmpty) {
+                                _currentSong = null;
+                              }
+                            });
+
+                            messenger.showSnackBar(
+                              SnackBar(
+                                content: Text("已移出佇列: ${song.title}"),
+                                duration: const Duration(seconds: 1),
+                              ),
+                            );
+                          },
+                          child: ListTile(
+                            leading: QueryArtworkWidget(
+                              id: song.id,
+                              type: ArtworkType.AUDIO,
+                              errorBuilder: (context, exception, giddig) {
+                                return const Icon(
+                                  Icons.music_note,
+                                  color: Colors.blue,
+                                );
+                              },
+                            ),
+                            title: Text(
+                              song.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontWeight: isPlaying
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                                color: isPlaying ? Colors.blue : Colors.black,
+                              ),
+                            ),
+                            subtitle: Text(song.artist ?? "未知藝術家"),
+                            trailing: isPlaying
+                                ? const Icon(
+                                    Icons.volume_up,
+                                    color: Colors.blue,
+                                  )
+                                : const Icon(
+                                    Icons.dehaze,
+                                  ), // Visual cue for list reordering/queue
+                            onTap: () async {
+                              // Jump directly to the clicked song in the active playlist
+                              await _audioPlayer.seek(
+                                Duration.zero,
+                                index: index,
+                              );
+                            },
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
         );
       },
     );
