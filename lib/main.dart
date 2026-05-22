@@ -34,6 +34,11 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
 
   SongModel? _currentSong;
 
+  // 新增：搜尋與歌單暫存變數
+  String _searchQuery = "";
+  final TextEditingController _searchController = TextEditingController();
+  List<SongModel> _allSongsList = [];
+
   @override
   void initState() {
     super.initState();
@@ -57,6 +62,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this); // 註銷監聽器
     _audioPlayer.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
@@ -160,54 +166,132 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                     child: const Text("授予權限"),
                   ),
                 )
-              : FutureBuilder<List<SongModel>>(
-                  future: _audioQuery.querySongs(
-                    sortType: null,
-                    orderType: OrderType.ASC_OR_SMALLER,
-                    uriType: UriType.EXTERNAL,
-                    ignoreCase: true,
-                  ),
-                  builder: (context, item) {
-                    if (item.connectionState == ConnectionState.waiting) {
-                      return const Center(child: CircularProgressIndicator());
-                    }
-                    if (item.data == null || item.data!.isEmpty) {
-                      return const Center(child: Text("未找到本地音樂檔案"));
-                    }
-
-                    return ListView.builder(
-                      // 留出底部空間給 Mini Player，避免最後一首歌被遮擋
-                      padding: EdgeInsets.only(
-                        bottom: _currentSong != null ? 80 : 0,
+              : Column(
+                  children: [
+                    // 中英日文搜尋框
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16.0, 8.0, 16.0, 8.0),
+                      child: TextField(
+                        controller: _searchController,
+                        style: const TextStyle(color: Colors.black),
+                        decoration: InputDecoration(
+                          hintText: "搜尋歌名、歌手 (Search, 検索)...",
+                          hintStyle: const TextStyle(color: Colors.grey),
+                          prefixIcon: const Icon(
+                            Icons.search,
+                            color: Colors.blue,
+                          ),
+                          suffixIcon: _searchQuery.isNotEmpty
+                              ? IconButton(
+                                  icon: const Icon(
+                                    Icons.clear,
+                                    color: Colors.grey,
+                                  ),
+                                  onPressed: () {
+                                    _searchController.clear();
+                                    setState(() {
+                                      _searchQuery = "";
+                                    });
+                                  },
+                                )
+                              : null,
+                          filled: true,
+                          fillColor: Colors.grey[100],
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(30.0),
+                            borderSide: BorderSide.none,
+                          ),
+                        ),
+                        onChanged: (value) {
+                          setState(() {
+                            _searchQuery = value;
+                          });
+                        },
                       ),
-                      itemCount: item.data!.length,
-                      itemBuilder: (context, index) {
-                        SongModel song = item.data![index];
-                        return ListTile(
-                          title: Text(
-                            song.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(song.artist ?? "未知歌手"),
-                          leading: QueryArtworkWidget(
-                            id: song.id,
-                            type: ArtworkType.AUDIO,
-                            nullArtworkWidget: const Icon(
-                              Icons.music_note,
-                              size: 40,
-                            ),
-                          ),
-                          trailing: const Icon(Icons.play_arrow),
-                          onTap: () => _playSong(item.data![index]),
-                        );
-                      },
-                    );
-                  },
-                ),
+                    ),
 
+                    // 音樂列表區域
+                    Expanded(
+                      child: FutureBuilder<List<SongModel>>(
+                        future: _audioQuery.querySongs(
+                          sortType: null,
+                          orderType: OrderType.ASC_OR_SMALLER,
+                          uriType: UriType.EXTERNAL,
+                          ignoreCase: true,
+                        ),
+                        builder: (context, item) {
+                          if (item.connectionState == ConnectionState.waiting) {
+                            return const Center(
+                              child: CircularProgressIndicator(),
+                            );
+                          }
+                          if (item.data == null || item.data!.isEmpty) {
+                            return const Center(child: Text("未找到本地音樂檔案"));
+                          }
+
+                          // 記錄原始獲取的全域歌單
+                          _allSongsList = item.data!;
+
+                          // 進行即時中英日文關鍵字過濾
+                          List<SongModel> filteredSongs = _allSongsList.where((
+                            song,
+                          ) {
+                            final query = _searchQuery.toLowerCase().trim();
+                            if (query.isEmpty) return true;
+
+                            final title = (song.title).toLowerCase();
+                            final artist = (song.artist ?? "").toLowerCase();
+
+                            return title.contains(query) ||
+                                artist.contains(query);
+                          }).toList();
+
+                          if (filteredSongs.isEmpty) {
+                            return const Center(
+                              child: Text(
+                                "找不到相符的歌曲",
+                                style: TextStyle(color: Colors.grey),
+                              ),
+                            );
+                          }
+
+                          return ListView.builder(
+                            // 動態預留底部間距，有播歌時塞 100 像素阻擋 Mini Player，沒播歌時回歸 16 像素
+                            padding: EdgeInsets.only(
+                              bottom: _currentSong != null ? 100.0 : 16.0,
+                            ),
+                            itemCount: filteredSongs.length,
+                            itemBuilder: (context, index) {
+                              SongModel song = filteredSongs[index];
+                              return ListTile(
+                                title: Text(
+                                  song.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: Text(song.artist ?? "未知歌手"),
+                                leading: QueryArtworkWidget(
+                                  id: song.id,
+                                  type: ArtworkType.AUDIO,
+                                  nullArtworkWidget: const Icon(
+                                    Icons.music_note,
+                                    size: 40,
+                                  ),
+                                ),
+                                trailing: const Icon(Icons.play_arrow),
+                                // 點擊直接將當前這一首加進自訂的播放佇列
+                                onTap: () => _playSong(song),
+                              );
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
           // 實作底部迷你播放控制列 (Mini Player)
-          if (_currentSong != null) _buildMiniPlayer(),
+          if (_currentSong != null)
+            Positioned(bottom: 0, left: 0, right: 0, child: _buildMiniPlayer()),
         ],
       ),
     );
