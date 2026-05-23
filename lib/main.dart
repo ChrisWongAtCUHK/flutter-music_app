@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:on_audio_query/on_audio_query.dart';
+import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(
   const MaterialApp(
@@ -47,6 +49,9 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
 
     // 讓播放器載入這個空的佇列
     _audioPlayer.setAudioSource(_playlist);
+
+    // 在 App 啟動時，自動從手機空間找回上次沒播完的歌單
+    _loadQueueFromStorage();
 
     // 監聽播放器目前播到第幾首，自動更新 Mini Player 的 UI
     _audioPlayer.currentIndexStream.listen((index) {
@@ -118,6 +123,8 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
         _myCurrentQueue.add(song);
       });
 
+      await _saveQueueToStorage(); // 加入歌曲後立刻儲存
+
       // 4. 如果這是加入的第一首歌（目前播放器是停止或剛啟動狀態），就直接播放
       if (_audioPlayer.processingState == ProcessingState.idle ||
           _playlist.length == 1) {
@@ -138,6 +145,44 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text("加入失敗: $e")));
+    }
+  }
+
+  // 將目前的播放佇列儲存到手機空間
+  Future<void> _saveQueueToStorage() async {
+    final prefs = await SharedPreferences.getInstance();
+    // 將 SongModel 列表轉換為 Map，再轉換為 JSON 字串清單
+    List<String> jsonList = _myCurrentQueue
+        .map((song) => jsonEncode(song.getMap))
+        .toList();
+    await prefs.setStringList('saved_music_queue', jsonList);
+  }
+
+  // 從手機空間還原上次沒播完的佇列
+  Future<void> _loadQueueFromStorage() async {
+    final prefs = await SharedPreferences.getInstance();
+    List<String>? jsonList = prefs.getStringList('saved_music_queue');
+
+    if (jsonList != null && jsonList.isNotEmpty) {
+      List<SongModel> loadedSongs = [];
+      List<AudioSource> audioSources = [];
+
+      for (String jsonStr in jsonList) {
+        Map<dynamic, dynamic> songMap = jsonDecode(jsonStr);
+        SongModel song = SongModel(songMap);
+        loadedSongs.add(song);
+        audioSources.add(AudioSource.uri(Uri.parse(song.uri!), tag: song));
+      }
+
+      // 將歌曲載入 just_audio 播放器與 UI 陣列中
+      await _playlist.addAll(audioSources);
+      setState(() {
+        _myCurrentQueue.addAll(loadedSongs);
+        // 預設將當前歌曲設為佇列的第一首，但先不自動播放
+        if (_myCurrentQueue.isNotEmpty) {
+          _currentSong = _myCurrentQueue.first;
+        }
+      });
     }
   }
 
@@ -290,8 +335,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                   ],
                 ),
           // 實作底部迷你播放控制列 (Mini Player)
-          if (_currentSong != null)
-            Positioned(bottom: 0, left: 0, right: 0, child: _buildMiniPlayer()),
+          if (_currentSong != null) _buildMiniPlayer(),
         ],
       ),
     );
@@ -459,6 +503,8 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                         _currentSong = null;
                       });
 
+                      await _saveQueueToStorage(); // 清空後把手機裡的記憶也清空
+
                       // 同步刷新彈出視窗內部（列表立刻變空，不需點擊兩次）
                       sheetState(() {});
                     },
@@ -517,6 +563,8 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                                 _currentSong = null;
                               }
                             });
+
+                            await _saveQueueToStorage(); // 刪除歌曲後更新記憶
 
                             messenger.showSnackBar(
                               SnackBar(
