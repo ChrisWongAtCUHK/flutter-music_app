@@ -183,6 +183,16 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
           _currentSong = _myCurrentQueue.first;
         }
       });
+
+      // 主動告訴播放器，將初始位置對準第 0 首（第一個音訊來源），但先不呼叫 .play()
+      // 這樣當使用者在 Mini Player 按下播放鍵時，播放器才能順利找到音軌開始播放
+      if (_myCurrentQueue.isNotEmpty) {
+        await _audioPlayer.setAudioSource(
+          _playlist,
+          initialIndex: 0,
+          initialPosition: Duration.zero,
+        );
+      }
     }
   }
 
