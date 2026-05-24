@@ -3,14 +3,32 @@ import 'package:just_audio/just_audio.dart';
 import 'package:on_audio_query/on_audio_query.dart';
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:audio_service/audio_service.dart';
 
-void main() => runApp(
-  const MaterialApp(
-    home: LocalMusicPlayer(),
-    // 移除右上角的 Debug 標籤
-    debugShowCheckedModeBanner: false,
-  ),
-);
+late MyAudioHandler audioHandler;
+
+void main() async {
+  // 1. 確保 Flutter 引擎初始化
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // 2. 初始化音訊背景服務
+  audioHandler = await AudioService.init(
+    builder: () => MyAudioHandler(),
+    config: const AudioServiceConfig(
+      androidNotificationChannelId: 'com.example.musicplayer.channel.audio',
+      androidNotificationChannelName: '音樂播放器',
+      androidNotificationOngoing: true, // 讓通知欄不可被輕易劃掉
+      androidShowNotificationBadge: true,
+    ),
+  );
+  runApp(
+    const MaterialApp(
+      home: LocalMusicPlayer(),
+      // 移除右上角的 Debug 標籤
+      debugShowCheckedModeBanner: false,
+    ),
+  );
+}
 
 class LocalMusicPlayer extends StatefulWidget {
   const LocalMusicPlayer({super.key});
@@ -23,11 +41,6 @@ class LocalMusicPlayer extends StatefulWidget {
 class _LocalMusicPlayerState extends State<LocalMusicPlayer>
     with WidgetsBindingObserver {
   final OnAudioQuery _audioQuery = OnAudioQuery();
-  final AudioPlayer _audioPlayer = AudioPlayer();
-  // 初始化一個空的可追加播放佇列
-  final ConcatenatingAudioSource _playlist = ConcatenatingAudioSource(
-    children: [],
-  );
 
   // 記錄目前加進播放佇列裡的歌曲物件（給播放佇列畫面 UI 使用）
   final List<SongModel> _myCurrentQueue = [];
@@ -45,16 +58,34 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this); // 註冊監聽器
-    _checkAndRequestPermission();
 
-    // 讓播放器載入這個空的佇列
-    _audioPlayer.setAudioSource(_playlist);
+    // 直接從全域 audioHandler 獲取它唯一的播放器，保持狀態同步
+    final player = audioHandler.player;
+
+    // 在 App 啟動、畫面還沒畫出來前，先讓播放器載入 audioHandler 內部的播放佇列
+    player.setAudioSource(audioHandler.playlist, preload: false).catchError((
+      e,
+    ) {
+      debugPrint("播放器初始載入失敗: $e");
+      return null;
+    });
+
+    _checkAndRequestPermission();
 
     // 在 App 啟動時，自動從手機空間找回上次沒播完的歌單
     _loadQueueFromStorage();
 
     // 監聽播放器目前播到第幾首，自動更新 Mini Player 的 UI
-    _audioPlayer.currentIndexStream.listen((index) {
+    audioHandler.player.currentIndexStream.listen((index) {
+      if (index != null && index < _myCurrentQueue.length && mounted) {
+        setState(() {
+          _currentSong = _myCurrentQueue[index];
+        });
+      }
+    });
+
+    // 監聽播放器目前播到第幾首，自動更新 Mini Player 與主畫面的歌曲資訊 UI
+    player.currentIndexStream.listen((index) {
       if (index != null && index < _myCurrentQueue.length && mounted) {
         setState(() {
           _currentSong = _myCurrentQueue[index];
@@ -65,8 +96,9 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
 
   @override
   void dispose() {
+    final player = audioHandler.player;
     WidgetsBinding.instance.removeObserver(this); // 註銷監聽器
-    _audioPlayer.dispose();
+    player.dispose();
     _searchController.dispose();
     super.dispose();
   }
@@ -116,7 +148,18 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
 
       // 2. 包裝成 AudioSource 並追加到 just_audio 的佇列結尾
       final source = AudioSource.uri(Uri.parse(song.uri!), tag: song);
-      await _playlist.add(source);
+      await audioHandler.playlist.add(source);
+
+      // 將 SongModel 轉換為 MediaItem 並更新至背景 queue
+      final mediaItem = MediaItem(
+        id: song.id.toString(),
+        album: "本地音樂",
+        title: song.title,
+        artist: song.artist ?? "未知歌手",
+        duration: Duration(milliseconds: song.duration ?? 0),
+      );
+      final currentQueue = audioHandler.queue.value;
+      audioHandler.queue.add([...currentQueue, mediaItem]); // 確保系統能讀取到 queue
 
       // 3. 同步加到我們自己的 UI 歌單陣列裡
       setState(() {
@@ -126,13 +169,15 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
       await _saveQueueToStorage(); // 加入歌曲後立刻儲存
 
       // 4. 如果這是加入的第一首歌（目前播放器是停止或剛啟動狀態），就直接播放
-      if (_audioPlayer.processingState == ProcessingState.idle ||
-          _playlist.length == 1) {
+      if (audioHandler.player.processingState == ProcessingState.idle ||
+          audioHandler.playlist.length == 1) {
         setState(() {
           _currentSong = song;
         });
-        await _audioPlayer.seek(Duration.zero, index: _playlist.length - 1);
-        _audioPlayer.play();
+        audioHandler.player
+            .seek(Duration.zero, index: audioHandler.playlist.length - 1)
+            .catchError((e) => {debugPrint("播放失敗: $e")});
+        audioHandler.player.play();
       } else {
         if (!mounted) return;
         // 如果本來就在放歌，跳出提示告訴用戶已成功加入佇列
@@ -174,8 +219,25 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
         audioSources.add(AudioSource.uri(Uri.parse(song.uri!), tag: song));
       }
 
-      // 將歌曲載入 just_audio 播放器與 UI 陣列中
-      await _playlist.addAll(audioSources);
+      final player = audioHandler.player;
+      final playlist = audioHandler.playlist; // ★ 改用 audioHandler 內部的佇列
+
+      await playlist.clear();
+      await playlist.addAll(audioSources);
+
+      List<MediaItem> mediaItems = loadedSongs
+          .map(
+            (song) => MediaItem(
+              id: song.id.toString(),
+              album: "本地音樂",
+              title: song.title,
+              artist: song.artist ?? "未知歌手",
+              duration: Duration(milliseconds: song.duration ?? 0),
+            ),
+          )
+          .toList();
+      audioHandler.queue.add(mediaItems);
+
       setState(() {
         _myCurrentQueue.addAll(loadedSongs);
         // 預設將當前歌曲設為佇列的第一首，但先不自動播放
@@ -187,11 +249,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
       // 主動告訴播放器，將初始位置對準第 0 首（第一個音訊來源），但先不呼叫 .play()
       // 這樣當使用者在 Mini Player 按下播放鍵時，播放器才能順利找到音軌開始播放
       if (_myCurrentQueue.isNotEmpty) {
-        await _audioPlayer.setAudioSource(
-          _playlist,
-          initialIndex: 0,
-          initialPosition: Duration.zero,
-        );
+        await player.setAudioSource(playlist, initialIndex: 0, preload: false);
       }
     }
   }
@@ -328,10 +386,12 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                                 leading: QueryArtworkWidget(
                                   id: song.id,
                                   type: ArtworkType.AUDIO,
-                                  nullArtworkWidget: const Icon(
-                                    Icons.music_note,
-                                    size: 40,
-                                  ),
+                                  errorBuilder: (context, exception, giddig) {
+                                    return const Icon(
+                                      Icons.music_note,
+                                      size: 40,
+                                    );
+                                  },
                                 ),
                                 trailing: const Icon(Icons.play_arrow),
                                 // 點擊直接將當前這一首加進自訂的播放佇列
@@ -366,11 +426,13 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
             QueryArtworkWidget(
               id: _currentSong!.id,
               type: ArtworkType.AUDIO,
-              nullArtworkWidget: const Icon(
-                Icons.music_note,
-                color: Colors.white,
-                size: 30,
-              ),
+              errorBuilder: (context, exception, giddig) {
+                return const Icon(
+                  Icons.music_note,
+                  color: Colors.white,
+                  size: 30,
+                );
+              },
             ),
             const SizedBox(width: 12),
             // 歌名與歌手
@@ -400,7 +462,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
 
             // 監聽播放器狀態，動態切換 播放/暫停 按鈕
             StreamBuilder<PlayerState>(
-              stream: _audioPlayer.playerStateStream,
+              stream: audioHandler.player.playerStateStream,
               builder: (context, snapshot) {
                 final playerState = snapshot.data;
                 final playing = playerState?.playing ?? false;
@@ -409,7 +471,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                   children: [
                     IconButton(
                       icon: const Icon(Icons.skip_previous),
-                      onPressed: () => _audioPlayer.seekToPrevious(),
+                      onPressed: () => audioHandler.player.seekToPrevious(),
                     ),
                     // 1. 播放 / 暫停 控制鈕
                     IconButton(
@@ -417,9 +479,9 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                       color: Colors.white,
                       onPressed: () {
                         if (playing) {
-                          _audioPlayer.pause(); // 執行暫停：停在當前秒數
+                          audioHandler.player.pause(); // 執行暫停：停在當前秒數
                         } else {
-                          _audioPlayer.play(); // 執行續播：從剛才地方繼續
+                          audioHandler.player.play(); // 執行續播：從剛才地方繼續
                         }
                       },
                     ),
@@ -428,7 +490,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                       icon: const Icon(Icons.stop),
                       color: Colors.redAccent,
                       onPressed: () async {
-                        await _audioPlayer.stop(); // 執行停止：關閉音訊並重設進度
+                        await audioHandler.player.stop(); // 執行停止：關閉音訊並重設進度
                         setState(() {
                           _currentSong = null; // 關閉底部的 Mini Player 介面
                         });
@@ -436,7 +498,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                     ),
                     IconButton(
                       icon: const Icon(Icons.skip_next),
-                      onPressed: () => _audioPlayer.seekToNext(),
+                      onPressed: () => audioHandler.player.seekToNext(),
                     ),
                     IconButton(
                       icon: const Icon(Icons.queue_music),
@@ -487,7 +549,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
     StateSetter sheetState,
   ) {
     return StreamBuilder<int?>(
-      stream: _audioPlayer.currentIndexStream,
+      stream: audioHandler.player.currentIndexStream,
       builder: (context, snapshot) {
         final currentIndex = snapshot.data;
 
@@ -504,8 +566,8 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                 if (playlistSongs.isNotEmpty)
                   TextButton.icon(
                     onPressed: () async {
-                      await _playlist.clear(); // 清空播放器佇列
-                      _audioPlayer.stop(); // 停止播放
+                      await audioHandler.playlist.clear(); // 清空播放器佇列
+                      audioHandler.player.stop(); // 停止播放
 
                       // 同步刷新主畫面（Mini Player 會消失）
                       setState(() {
@@ -514,6 +576,8 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                       });
 
                       await _saveQueueToStorage(); // 清空後把手機裡的記憶也清空
+
+                      audioHandler.queue.add([]);
 
                       // 同步刷新彈出視窗內部（列表立刻變空，不需點擊兩次）
                       sheetState(() {});
@@ -563,7 +627,18 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                             final messenger = ScaffoldMessenger.of(context);
 
                             // 1. 從 just_audio 播放器佇列中移除
-                            await _playlist.removeAt(index);
+                            await audioHandler.playlist.removeAt(index);
+
+                            // 獲取當前鎖定畫面的舊佇列，複製一份並移除該歌曲，這就是 updatedQueue
+                            final List<MediaItem> updatedQueue = List.from(
+                              audioHandler.queue.value,
+                            );
+                            if (index < updatedQueue.length) {
+                              updatedQueue.removeAt(index); // 移除背景系統中的同一首歌
+                            }
+                            audioHandler.queue.add(
+                              updatedQueue,
+                            ); // 將更新後的佇列送回給鎖定畫面系統
 
                             // 2. 從我們的 UI 陣列中移除
                             setState(() {
@@ -616,10 +691,9 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                                   ), // Visual cue for list reordering/queue
                             onTap: () async {
                               // Jump directly to the clicked song in the active playlist
-                              await _audioPlayer.seek(
-                                Duration.zero,
-                                index: index,
-                              );
+                              await audioHandler.player
+                                  .seek(Duration.zero, index: index)
+                                  .catchError((e) => {debugPrint("播放失敗: $e")});
                             },
                           ),
                         );
@@ -629,6 +703,125 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
           ],
         );
       },
+    );
+  }
+}
+
+class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
+  // 將播放器本體搬進 Handler 內部，作為唯一的真相來源
+  final AudioPlayer _player = AudioPlayer();
+
+  // 將播放佇列管理本體也搬進背景服務中
+  final ConcatenatingAudioSource _playlist = ConcatenatingAudioSource(
+    children: [],
+  );
+
+  // 提供外部介面讓 State 能夠拿得到播放器實例
+  AudioPlayer get player => _player;
+
+  // 提供對外的公開 Getter，讓主畫面的 initState 能夠存取到它
+  ConcatenatingAudioSource get playlist => _playlist;
+
+  MyAudioHandler() {
+    // 監聽播放器的各種事件，並即時回傳給 Android 鎖定畫面系統
+    _player.playbackEventStream.map(_transformEvent).pipe(playbackState);
+
+    // 監聽當前播放歌曲的索引，用來更新通知欄上的歌名、歌手與封面
+    _player.currentIndexStream.listen((index) {
+      if (index != null &&
+          queue.value.isNotEmpty &&
+          index < queue.value.length) {
+        mediaItem.add(queue.value[index]);
+      }
+    });
+  }
+
+  // 將 just_audio 的事件包裝轉化為系統通知欄能看懂的格式
+  PlaybackState _transformEvent(PlaybackEvent event) {
+    return PlaybackState(
+      controls: [
+        MediaControl.skipToPrevious,
+        _player.playing ? MediaControl.pause : MediaControl.play,
+        MediaControl.stop,
+        MediaControl.skipToNext,
+      ],
+      systemActions: const {MediaAction.seek},
+      androidCompactActionIndices: const [0, 1, 3],
+      processingState: const {
+        ProcessingState.idle: AudioProcessingState.idle,
+        ProcessingState.loading: AudioProcessingState.loading,
+        ProcessingState.buffering: AudioProcessingState.buffering,
+        ProcessingState.ready: AudioProcessingState.ready,
+        ProcessingState.completed: AudioProcessingState.completed,
+      }[_player.processingState]!,
+      playing: _player.playing,
+      updatePosition: _player.position,
+      bufferedPosition: _player.bufferedPosition,
+      speed: _player.speed,
+      queueIndex: event.currentIndex,
+    );
+  }
+
+  // 實作系統鎖定畫面的 播放/暫停/停止 控制
+  @override
+  Future<void> play() => _player.play();
+  @override
+  Future<void> pause() => _player.pause();
+  @override
+  Future<void> stop() async {
+    await _player.stop();
+    await playbackState.firstWhere(
+      (state) => state.processingState == AudioProcessingState.idle,
+    );
+  }
+
+  @override
+  Future<void> seek(Duration position) => _player.seek(position);
+  @override
+  Future<void> skipToNext() => _player.seekToNext();
+  @override
+  Future<void> skipToPrevious() => _player.seekToPrevious();
+
+  // 外部可以透過這個方法，隨時更新鎖定畫面的播放狀態
+  void updateState(
+    bool isPlaying,
+    Duration position,
+    Duration buffered,
+    Duration total,
+  ) {
+    playbackState.add(
+      playbackState.value.copyWith(
+        playing: isPlaying,
+        controls: [
+          MediaControl.skipToPrevious,
+          isPlaying ? MediaControl.pause : MediaControl.play,
+          MediaControl.stop,
+          MediaControl.skipToNext,
+        ],
+        updatePosition: position,
+        bufferedPosition: buffered,
+        // 依據播放器狀態調整系統狀態
+        processingState: AudioProcessingState.ready,
+      ),
+    );
+  }
+
+  // 外部點擊新歌曲時，用來更新鎖定畫面上的歌名、歌手與封面
+  void updateMetadata(
+    String title,
+    String artist,
+    String? artworkUri,
+    Duration duration,
+  ) {
+    mediaItem.add(
+      MediaItem(
+        id: title,
+        album: "本地音樂",
+        title: title,
+        artist: artist,
+        duration: duration,
+        artUri: artworkUri != null ? Uri.parse(artworkUri) : null,
+      ),
     );
   }
 }
