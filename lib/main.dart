@@ -16,7 +16,7 @@ Future<void> main() async {
     builder: () => MyAudioHandler(),
     config: const AudioServiceConfig(
       androidNotificationChannelId: 'com.example.musicplayer.channel.audio',
-      androidNotificationChannelName: '音樂播放器',
+      androidNotificationChannelName: 'Simple Music Player',
       androidNotificationOngoing: true, // 讓通知欄不可被輕易劃掉
       androidShowNotificationBadge: true,
     ),
@@ -255,7 +255,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("本地 MP3 播放器"),
+        title: const Text("Simple Music Player"),
         actions: [
           // 右上角放一個手動整理按鈕，方便測試
           IconButton(
