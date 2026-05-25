@@ -7,7 +7,7 @@ import 'package:audio_service/audio_service.dart';
 
 late MyAudioHandler audioHandler;
 
-void main() async {
+Future<void> main() async {
   // 1. 確保 Flutter 引擎初始化
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -96,9 +96,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
 
   @override
   void dispose() {
-    final player = audioHandler.player;
     WidgetsBinding.instance.removeObserver(this); // 註銷監聽器
-    player.dispose();
     _searchController.dispose();
     super.dispose();
   }
@@ -171,13 +169,12 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
       // 4. 如果這是加入的第一首歌（目前播放器是停止或剛啟動狀態），就直接播放
       if (audioHandler.player.processingState == ProcessingState.idle ||
           audioHandler.playlist.length == 1) {
-        setState(() {
-          _currentSong = song;
-        });
-        audioHandler.player
-            .seek(Duration.zero, index: audioHandler.playlist.length - 1)
-            .catchError((e) => {debugPrint("播放失敗: $e")});
-        audioHandler.player.play();
+        await audioHandler.player.seek(
+          Duration.zero,
+          index: audioHandler.playlist.length - 1,
+        );
+        await audioHandler.play();
+        setState(() => _currentSong = song);
       } else {
         if (!mounted) return;
         // 如果本來就在放歌，跳出提示告訴用戶已成功加入佇列
@@ -464,24 +461,31 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
             StreamBuilder<PlayerState>(
               stream: audioHandler.player.playerStateStream,
               builder: (context, snapshot) {
-                final playerState = snapshot.data;
-                final playing = playerState?.playing ?? false;
-
                 return Row(
                   children: [
                     IconButton(
                       icon: const Icon(Icons.skip_previous),
-                      onPressed: () => audioHandler.player.seekToPrevious(),
+                      onPressed: () => audioHandler.skipToPrevious(),
                     ),
                     // 1. 播放 / 暫停 控制鈕
                     IconButton(
-                      icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                      icon: StreamBuilder<bool>(
+                        stream: audioHandler.playbackState
+                            .map((s) => s.playing)
+                            .distinct(),
+                        builder: (context, snapshot) {
+                          final playing = snapshot.data ?? false;
+                          return Icon(playing ? Icons.pause : Icons.play_arrow);
+                        },
+                      ),
                       color: Colors.white,
-                      onPressed: () {
+                      onPressed: () async {
+                        final playing =
+                            audioHandler.playbackState.value.playing;
                         if (playing) {
-                          audioHandler.player.pause(); // 執行暫停：停在當前秒數
+                          await audioHandler.pause();
                         } else {
-                          audioHandler.player.play(); // 執行續播：從剛才地方繼續
+                          await audioHandler.play();
                         }
                       },
                     ),
@@ -490,7 +494,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                       icon: const Icon(Icons.stop),
                       color: Colors.redAccent,
                       onPressed: () async {
-                        await audioHandler.player.stop(); // 執行停止：關閉音訊並重設進度
+                        await audioHandler.stop(); // 執行停止：關閉音訊並重設進度
                         setState(() {
                           _currentSong = null; // 關閉底部的 Mini Player 介面
                         });
@@ -498,7 +502,7 @@ class _LocalMusicPlayerState extends State<LocalMusicPlayer>
                     ),
                     IconButton(
                       icon: const Icon(Icons.skip_next),
-                      onPressed: () => audioHandler.player.seekToNext(),
+                      onPressed: () => audioHandler.skipToNext(),
                     ),
                     IconButton(
                       icon: const Icon(Icons.queue_music),
@@ -766,6 +770,19 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
       speed: _player.speed,
       queueIndex: _player.currentIndex,
     );
+  }
+
+  Future<void> setPlaylist(
+    List<MediaItem> items,
+    List<AudioSource> sources,
+  ) async {
+    await _playlist.clear();
+    await _playlist.addAll(sources);
+    queue.add(items);
+    if (items.isNotEmpty) {
+      mediaItem.add(items.first);
+      await _player.setAudioSource(_playlist, initialIndex: 0, preload: false);
+    }
   }
 
   // 實作系統鎖定畫面的 播放/暫停/停止 控制
