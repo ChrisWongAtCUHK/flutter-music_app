@@ -724,14 +724,20 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
 
   MyAudioHandler() {
     // 監聽播放器的各種事件，並即時回傳給 Android 鎖定畫面系統
-    _player.playbackEventStream.map(_transformEvent).pipe(playbackState);
+    _player.playbackEventStream.listen((event) {
+      playbackState.add(_transformEvent(event));
+    });
 
     // 監聽當前播放歌曲的索引，用來更新通知欄上的歌名、歌手與封面
     _player.currentIndexStream.listen((index) {
       if (index != null &&
           queue.value.isNotEmpty &&
           index < queue.value.length) {
-        mediaItem.add(queue.value[index]);
+        // A. 拿到目前正在播的那首 MediaItem 歌曲
+        final currentMediaItem = queue.value[index];
+
+        // B. 強制發送給系統的 mediaItem 管道（這能解鎖 Android 下拉通知欄的按鈕功能）
+        mediaItem.add(currentMediaItem);
       }
     });
   }
@@ -758,29 +764,48 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
       updatePosition: _player.position,
       bufferedPosition: _player.bufferedPosition,
       speed: _player.speed,
-      queueIndex: event.currentIndex,
+      queueIndex: _player.currentIndex,
     );
   }
 
   // 實作系統鎖定畫面的 播放/暫停/停止 控制
   @override
-  Future<void> play() => _player.play();
+  Future<void> play() async {
+    await _player.play();
+  }
+
   @override
-  Future<void> pause() => _player.pause();
+  Future<void> pause() async {
+    await _player.pause();
+  }
+
   @override
   Future<void> stop() async {
     await _player.stop();
-    await playbackState.firstWhere(
-      (state) => state.processingState == AudioProcessingState.idle,
+    // 發送終止狀態，通知欄會優雅消失或重置
+    playbackState.add(
+      playbackState.value.copyWith(
+        playing: false,
+        processingState: AudioProcessingState.idle,
+      ),
     );
   }
 
   @override
   Future<void> seek(Duration position) => _player.seek(position);
   @override
-  Future<void> skipToNext() => _player.seekToNext();
+  Future<void> skipToNext() async {
+    if (_player.hasNext) {
+      await _player.seekToNext();
+    }
+  }
+
   @override
-  Future<void> skipToPrevious() => _player.seekToPrevious();
+  Future<void> skipToPrevious() async {
+    if (_player.hasPrevious) {
+      await _player.seekToPrevious();
+    }
+  }
 
   // 外部可以透過這個方法，隨時更新鎖定畫面的播放狀態
   void updateState(
